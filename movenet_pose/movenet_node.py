@@ -13,7 +13,7 @@ class MoveNetNode(Node):
         self.br = CvBridge()
 
         # Declare parameters
-        self.declare_parameter('model_path', '/path/to/movenet_saved_model')
+        self.declare_parameter('model_path', '/home/ubuntu/ros2_ws/src/movenet_pose/models/movenet-tensorflow2-singlepose-lightning-v4')
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('sync_slop', 0.1)
         self.declare_parameter('score_threshold', 0.3)

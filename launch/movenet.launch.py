@@ -9,7 +9,7 @@ def generate_launch_description():
             name='movenet_node',
             output='screen',
             parameters=[
-                {'model_path': '/path/to/movenet_saved_model'},
+                {'model_path': '/home/ubuntu/ros2_ws/src/movenet_pose/models/movenet-tensorflow2-singlepose-lightning-v4'},
                 {'depth_scale': 0.001},
                 {'sync_slop': 0.1},
                 {'score_threshold': 0.3},
