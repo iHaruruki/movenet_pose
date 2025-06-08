@@ -1,3 +1,4 @@
+import os
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
@@ -5,6 +6,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 import tensorflow as tf
+import tensorflow_hub as hub
 import numpy as np
 
 class MoveNetNode(Node):
@@ -12,20 +14,22 @@ class MoveNetNode(Node):
         super().__init__('movenet_node')
         self.br = CvBridge()
 
-        # Declare parameters
-        self.declare_parameter('model_path', '/home/ubuntu/ros2_ws/src/movenet_pose/models/movenet-tensorflow2-singlepose-lightning-v4')
+        # Declare and read parameters
+        self.declare_parameter('model_url', 'https://tfhub.dev/google/movenet/singlepose/lightning/4')
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('sync_slop', 0.1)
         self.declare_parameter('score_threshold', 0.3)
 
-        # Load MoveNet model
-        model_path = self.get_parameter('model_path').get_parameter_value().string_value
-        self.model = tf.saved_model.load(model_path)
+        model_url = self.get_parameter('model_url').get_parameter_value().string_value
+        # Load model via TensorFlow Hub
+        self.get_logger().info(f"Loading MoveNet model from: {model_url}")
+        loaded = hub.load(model_url)
+        self.infer = loaded.signatures['serving_default']
 
         # Publisher for skeleton markers
         self.marker_pub = self.create_publisher(MarkerArray, 'skeleton_markers', 10)
 
-        # Subscribers for RGB images and depth
+        # Subscribers for synchronized RGB and Depth
         sub_color = Subscriber(self, Image, '/camera/color/image_raw')
         sub_cinfo = Subscriber(self, CameraInfo, '/camera/color/camera_info')
         sub_depth = Subscriber(self, Image, '/camera/depth/image_raw')
@@ -39,18 +43,19 @@ class MoveNetNode(Node):
         ats.registerCallback(self.callback)
 
     def preprocess(self, img: np.ndarray) -> tf.Tensor:
-        img_resized = tf.image.resize(img, [192, 192])
-        tensor = tf.expand_dims(img_resized, axis=0)
-        return tf.cast(tensor, tf.int32)
+        # TF Hub MoveNet expects [1,192,192,3] int32 input
+        img = tf.expand_dims(img, axis=0)
+        img = tf.cast(tf.image.resize_with_pad(img, 192, 192), dtype=tf.int32)
+        return img
 
     def callback(self, img_msg, cinfo_msg, depth_msg, dinfo_msg):
-        # Convert ROS images to OpenCV
+        # Convert images
         color = self.br.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
         depth = self.br.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
 
-        # Run MoveNet
+        # Prepare input and run inference
         input_tensor = self.preprocess(color)
-        outputs = self.model(input_tensor)
+        outputs = self.infer(input=input_tensor)
         kpts = outputs['output_0'].numpy()[0, 0, :, :]  # shape (17,3)
 
         # Camera intrinsics
@@ -66,7 +71,7 @@ class MoveNetNode(Node):
                 continue
             u = int(x_norm * img_msg.width)
             v = int(y_norm * img_msg.height)
-            if v < 0 or v >= depth.shape[0] or u < 0 or u >= depth.shape[1]:
+            if not (0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]):
                 continue
             z = float(depth[v, u]) * depth_scale
 
