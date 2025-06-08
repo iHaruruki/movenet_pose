@@ -1,0 +1,24 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/home/ubuntu/ros2_ws/build/ros2bag_csv",
+        "/home/ubuntu/ros2_ws/install/ros2bag_csv/lib/python3.10/site-packages",
+        "/home/ubuntu/ros2_ws/build/mediapipe_pose_estimator",
+        "/home/ubuntu/ros2_ws/install/mediapipe_pose_estimator/lib/python3.10/site-packages",
+        "/home/ubuntu/ros2_ws/build/hri_body_detect",
+        "/home/ubuntu/ros2_ws/install/hri_body_detect/lib/python3.10/site-packages",
+        "/home/ubuntu/ros2_ws/install/astra_camera_msgs/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/ubuntu/ros2_ws/build/ros2bag_csv",
+        "/home/ubuntu/ros2_ws/install/ros2bag_csv/lib/python3.10/site-packages",
+        "/home/ubuntu/ros2_ws/build/mediapipe_pose_estimator",
+        "/home/ubuntu/ros2_ws/install/mediapipe_pose_estimator/lib/python3.10/site-packages",
+        "/home/ubuntu/ros2_ws/build/hri_body_detect",
+        "/home/ubuntu/ros2_ws/install/hri_body_detect/lib/python3.10/site-packages",
+        "/home/ubuntu/ros2_ws/install/astra_camera_msgs/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ]
+}
