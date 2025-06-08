@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'movenet_node = movenet_pose.movenet_node:main',
         ],
     },
 )
