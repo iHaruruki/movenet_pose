@@ -1,5 +1,5 @@
 #
 ## Dependency
 ```shell
-$ pip install tensorflow
+$ pip install tensorflow-cpu
 ```
