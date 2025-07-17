@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'movenet_node = movenet_pose.movenet_node:main',
+            'sound_node = movenet_pose.sound:main',
         ],
     },
 )
