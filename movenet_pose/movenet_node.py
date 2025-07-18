@@ -1,4 +1,6 @@
+#!/usr/bin/env python3
 import os
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
@@ -15,13 +17,20 @@ class MoveNetNode(Node):
         super().__init__('movenet_node')
         self.br = CvBridge()
 
-        # Declare and read parameters
+        # Parameters
         self.declare_parameter('model_url', 'https://tfhub.dev/google/movenet/singlepose/lightning/4')
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('sync_slop', 0.1)
         self.declare_parameter('score_threshold', 0.3)
+        self.declare_parameter('smoothing_alpha', 0.6)  # EMA smoothing factor
 
+        # Load parameters
         model_url = self.get_parameter('model_url').get_parameter_value().string_value
+        self.depth_scale = self.get_parameter('depth_scale').get_parameter_value().double_value
+        self.score_th = self.get_parameter('score_threshold').get_parameter_value().double_value
+        self.alpha = self.get_parameter('smoothing_alpha').get_parameter_value().double_value
+
+        # Load MoveNet model
         self.get_logger().info(f"Loading MoveNet model from: {model_url}")
         loaded = hub.load(model_url)
         self.infer = loaded.signatures['serving_default']
@@ -42,17 +51,15 @@ class MoveNetNode(Node):
         )
         ats.registerCallback(self.callback)
 
-        # Define skeleton connections (COCO/MoveNet ordering)
+        # For EMA smoothing: previous smoothed positions
+        self.prev_positions = {}
+
+        # COCO skeleton connections
         self.connections = [
-            (0,1),  (1,3),  # nose→left eye→left ear
-            (0,2),  (2,4),  # nose→right eye→right ear
-            (5,6),            # left shoulder→right shoulder
-            (5,7),  (7,9),  # left shoulder→elbow→wrist
-            (6,8),  (8,10), # right shoulder→elbow→wrist
-            (5,11), (6,12), # shoulders→hips
-            (11,12),         # left hip→right hip
-            (11,13), (13,15), # left hip→knee→ankle
-            (12,14), (14,16)  # right hip→knee→ankle
+            (0,1), (1,3), (0,2), (2,4), (5,6),
+            (5,7), (7,9), (6,8), (8,10),
+            (5,11), (6,12), (11,12),
+            (11,13), (13,15), (12,14), (14,16)
         ]
 
     def preprocess(self, img: np.ndarray) -> tf.Tensor:
@@ -65,24 +72,22 @@ class MoveNetNode(Node):
         color = self.br.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
         depth = self.br.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
 
-        # Run MoveNet
+        # Run inference
         input_tensor = self.preprocess(color)
         outputs = self.infer(input=input_tensor)
         kpts = outputs['output_0'].numpy()[0, 0, :, :]  # (17,3)
 
-        # Intrinsics & thresholds
+        # Camera intrinsics
         k = cinfo_msg.k
         fx, fy = k[0], k[4]
         cx, cy = k[2], k[5]
-        depth_scale = self.get_parameter('depth_scale').get_parameter_value().double_value
-        score_th = self.get_parameter('score_threshold').get_parameter_value().double_value
 
         markers = MarkerArray()
-        positions = {}  # store 3D positions of visible keypoints
+        positions = {}
 
-        # --- Sphere markers for each keypoint ---
+        # Sphere markers with EMA smoothing
         for i, (y_n, x_n, score) in enumerate(kpts):
-            if score < score_th:
+            if score < self.score_th:
                 continue
 
             u = int(x_n * img_msg.width)
@@ -90,12 +95,24 @@ class MoveNetNode(Node):
             if not (0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]):
                 continue
 
-            z = float(depth[v, u]) * depth_scale
-            x = (u - cx) * z / fx
-            y = (v - cy) * z / fy
+            z_raw = float(depth[v, u]) * self.depth_scale
+            x_raw = (u - cx) * z_raw / fx
+            y_raw = (v - cy) * z_raw / fy
 
+            # Exponential Moving Average smoothing
+            if i in self.prev_positions:
+                x_prev, y_prev, z_prev = self.prev_positions[i]
+                x = self.alpha * x_raw + (1 - self.alpha) * x_prev
+                y = self.alpha * y_raw + (1 - self.alpha) * y_prev
+                z = self.alpha * z_raw + (1 - self.alpha) * z_prev
+            else:
+                x, y, z = x_raw, y_raw, z_raw
+
+            # Save smoothed position
+            self.prev_positions[i] = (x, y, z)
             positions[i] = (x, y, z)
 
+            # Create sphere marker
             m = Marker()
             m.header = img_msg.header
             m.ns = 'skeleton'
@@ -110,35 +127,35 @@ class MoveNetNode(Node):
             m.color.r = 1.0
             markers.markers.append(m)
 
-        # --- Line marker connecting the keypoints ---
+        # Line list marker connecting smoothed keypoints
         line_marker = Marker()
         line_marker.header = img_msg.header
         line_marker.ns = 'skeleton_lines'
-        line_marker.id = 100  # unique ID
+        line_marker.id = 100
         line_marker.type = Marker.LINE_LIST
         line_marker.action = Marker.ADD
-        line_marker.scale.x = 0.02  # line width
+        line_marker.scale.x = 0.02
         line_marker.color.a = 1.0
-        line_marker.color.g = 1.0  # green lines
+        line_marker.color.g = 1.0
 
         for a, b in self.connections:
             if a in positions and b in positions:
-                # geometry_msgs Point must be constructed without positional args
                 p1 = Point()
                 p1.x, p1.y, p1.z = positions[a]
                 p2 = Point()
                 p2.x, p2.y, p2.z = positions[b]
                 line_marker.points.extend([p1, p2])
-        
 
         markers.markers.append(line_marker)
-
-        # Publish both spheres and lines
         self.marker_pub.publish(markers)
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = MoveNetNode()
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     node.destroy_node()
     rclpy.shutdown()
