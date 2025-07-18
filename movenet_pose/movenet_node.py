@@ -3,6 +3,8 @@ import os
 import sys
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image, CameraInfo
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
@@ -17,22 +19,26 @@ class MoveNetNode(Node):
         super().__init__('movenet_node')
         self.br = CvBridge()
 
-        # Parameters
+        # Declare parameters with defaults
         self.declare_parameter('model_url', 'https://tfhub.dev/google/movenet/singlepose/lightning/4')
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('sync_slop', 0.1)
-        self.declare_parameter('score_threshold', 0.3)
-        self.declare_parameter('smoothing_alpha', 0.6)  # EMA smoothing factor
+        self.declare_parameter('score_threshold', 0.5)
+        self.declare_parameter('smoothing_alpha', 0.65)
 
-        # Load parameters
-        model_url = self.get_parameter('model_url').get_parameter_value().string_value
+        # Load initial parameter values
+        self.model_url = self.get_parameter('model_url').get_parameter_value().string_value
         self.depth_scale = self.get_parameter('depth_scale').get_parameter_value().double_value
+        self.sync_slop = self.get_parameter('sync_slop').get_parameter_value().double_value
         self.score_th = self.get_parameter('score_threshold').get_parameter_value().double_value
         self.alpha = self.get_parameter('smoothing_alpha').get_parameter_value().double_value
 
+        # Callback for parameter changes at runtime
+        self.add_on_set_parameters_callback(self._on_param_change)
+
         # Load MoveNet model
-        self.get_logger().info(f"Loading MoveNet model from: {model_url}")
-        loaded = hub.load(model_url)
+        self.get_logger().info(f"Loading MoveNet model from: {self.model_url}")
+        loaded = hub.load(self.model_url)
         self.infer = loaded.signatures['serving_default']
 
         # Publisher for skeleton markers
@@ -47,11 +53,11 @@ class MoveNetNode(Node):
         ats = ApproximateTimeSynchronizer(
             [sub_color, sub_cinfo, sub_depth, sub_dinfo],
             queue_size=10,
-            slop=self.get_parameter('sync_slop').get_parameter_value().double_value
+            slop=self.sync_slop
         )
         ats.registerCallback(self.callback)
 
-        # For EMA smoothing: previous smoothed positions
+        # For EMA smoothing
         self.prev_positions = {}
 
         # COCO skeleton connections
@@ -62,22 +68,40 @@ class MoveNetNode(Node):
             (11,13), (13,15), (12,14), (14,16)
         ]
 
+    def _on_param_change(self, params):
+        successful = True
+        for param in params:
+            if param.name == 'depth_scale' and param.type_ == Parameter.Type.DOUBLE:
+                self.depth_scale = param.value
+                self.get_logger().info(f"depth_scale set to {self.depth_scale}")
+            elif param.name == 'sync_slop' and param.type_ == Parameter.Type.DOUBLE:
+                self.sync_slop = param.value
+                # Note: changing sync_slop at runtime does not reconfigure existing ATS
+                self.get_logger().info(f"sync_slop set to {self.sync_slop} (restart node to apply)")
+            elif param.name == 'score_threshold' and param.type_ == Parameter.Type.DOUBLE:
+                self.score_th = param.value
+                self.get_logger().info(f"score_threshold set to {self.score_th}")
+            elif param.name == 'smoothing_alpha' and param.type_ == Parameter.Type.DOUBLE:
+                self.alpha = param.value
+                self.get_logger().info(f"smoothing_alpha set to {self.alpha}")
+            else:
+                successful = False
+                self.get_logger().warn(f"Parameter '{param.name}' change not supported")
+        return SetParametersResult(successful=successful)
+
     def preprocess(self, img: np.ndarray) -> tf.Tensor:
         img = tf.expand_dims(img, axis=0)
         img = tf.cast(tf.image.resize_with_pad(img, 192, 192), dtype=tf.int32)
         return img
 
     def callback(self, img_msg, cinfo_msg, depth_msg, dinfo_msg):
-        # Convert images
         color = self.br.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
         depth = self.br.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
 
-        # Run inference
         input_tensor = self.preprocess(color)
         outputs = self.infer(input=input_tensor)
-        kpts = outputs['output_0'].numpy()[0, 0, :, :]  # (17,3)
+        kpts = outputs['output_0'].numpy()[0, 0, :, :]
 
-        # Camera intrinsics
         k = cinfo_msg.k
         fx, fy = k[0], k[4]
         cx, cy = k[2], k[5]
@@ -85,7 +109,7 @@ class MoveNetNode(Node):
         markers = MarkerArray()
         positions = {}
 
-        # Sphere markers with EMA smoothing
+        # Sphere markers with EMA
         for i, (y_n, x_n, score) in enumerate(kpts):
             if score < self.score_th:
                 continue
@@ -99,7 +123,6 @@ class MoveNetNode(Node):
             x_raw = (u - cx) * z_raw / fx
             y_raw = (v - cy) * z_raw / fy
 
-            # Exponential Moving Average smoothing
             if i in self.prev_positions:
                 x_prev, y_prev, z_prev = self.prev_positions[i]
                 x = self.alpha * x_raw + (1 - self.alpha) * x_prev
@@ -108,11 +131,9 @@ class MoveNetNode(Node):
             else:
                 x, y, z = x_raw, y_raw, z_raw
 
-            # Save smoothed position
             self.prev_positions[i] = (x, y, z)
             positions[i] = (x, y, z)
 
-            # Create sphere marker
             m = Marker()
             m.header = img_msg.header
             m.ns = 'skeleton'
@@ -127,7 +148,7 @@ class MoveNetNode(Node):
             m.color.r = 1.0
             markers.markers.append(m)
 
-        # Line list marker connecting smoothed keypoints
+        # LINE_LIST marker
         line_marker = Marker()
         line_marker.header = img_msg.header
         line_marker.ns = 'skeleton_lines'
